@@ -24,7 +24,11 @@ import {
   Flame,
   FileCheck2,
   Share2,
-  Download
+  Download,
+  Radio,
+  Loader2,
+  Check,
+  Languages
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { CASE_STUDIES } from './data/caseStudies';
@@ -37,19 +41,38 @@ export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [selectedCaseKey, setSelectedCaseKey] = useState<string>('PM_KISAN');
   const [currentStep, setCurrentStep] = useState<number>(1);
-  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('sarvam_api_key') || '');
   const [isCalling, setIsCalling] = useState<boolean>(false);
   const [callProgress, setCallProgress] = useState<string>('IDLE');
   const [audioPlaying, setAudioPlaying] = useState<boolean>(false);
   const [tamperSimulated, setTamperSimulated] = useState<boolean>(false);
   const [customReceiptImage, setCustomReceiptImage] = useState<string | null>(null);
 
+  // Live Sarvam API States
+  const [apiOnline, setApiOnline] = useState<boolean>(false);
+  const [liveLlmLoading, setLiveLlmLoading] = useState<boolean>(false);
+  const [liveLlmOutput, setLiveLlmOutput] = useState<string | null>(null);
+  const [liveTtsLoading, setLiveTtsLoading] = useState<boolean>(false);
+  const [liveTtsAudioUrl, setLiveTtsAudioUrl] = useState<string | null>(null);
+  const [liveTranslateLoading, setLiveTranslateLoading] = useState<boolean>(false);
+  const [liveTranslation, setLiveTranslation] = useState<string | null>(null);
+
   const activeCase: CaseStudy = CASE_STUDIES[selectedCaseKey] || CASE_STUDIES.PM_KISAN;
   const audioSynthRef = useRef<WebAudioSynthesizer | null>(null);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     audioSynthRef.current = new WebAudioSynthesizer();
     document.documentElement.setAttribute('data-theme', theme);
+
+    // Check Live Sarvam API connectivity
+    fetch('/api/sarvam-live/status')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.status === 'online') {
+          setApiOnline(true);
+        }
+      })
+      .catch(() => setApiOnline(false));
   }, [theme]);
 
   // Handle Merkle computation
@@ -70,6 +93,12 @@ export default function App() {
     setTamperSimulated(false);
     setIsCalling(false);
     setCallProgress('IDLE');
+    setLiveLlmOutput(null);
+    setLiveTtsAudioUrl(null);
+    setLiveTranslation(null);
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+    }
   }, [baseMerkle]);
 
   const steps = [
@@ -82,6 +111,104 @@ export default function App() {
     { num: 7, title: 'Intelligence Report', icon: BarChart3, desc: 'Executive Audit' },
   ];
 
+  // 1. Live Sarvam-105B Call
+  const handleRunLiveLlm = async () => {
+    setLiveLlmLoading(true);
+    try {
+      const prompt = `You are a forensic audit AI for Indian Direct Benefit Transfer (DBT) welfare schemes.
+Analyze the following optical scan extracted from a beneficiary voucher:
+- Scheme: ${activeCase.scheme}
+- Raw Beneficiary: ${activeCase.beneficiaryName.raw}
+- Amount on Voucher: Rs ${activeCase.amounts.paidInSlip}
+- Sanctioned Amount: Rs ${activeCase.reconciliation.sanctionedAmount}
+- Date: ${activeCase.payoutDate.raw}
+- Taluk / Office: ${activeCase.talukId}
+- Biometric state: ${activeCase.biometrics.type} (Duplicate: ${activeCase.biometrics.duplicateDetected})
+
+Extract clean, structured JSON with keys:
+"beneficiary_normalized", "scheme", "paid_amount_inr", "sanctioned_amount_inr", "leakage_detected", "leakage_amount_inr", "anomaly_category", "audit_action". Return ONLY valid JSON.`;
+
+      const res = await fetch('/api/sarvam-live/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      });
+      const data = await res.json();
+      const content = data.choices?.[0]?.message?.content || JSON.stringify(data, null, 2);
+      setLiveLlmOutput(content);
+    } catch (e: any) {
+      setLiveLlmOutput(`Error calling Sarvam API: ${e.message}`);
+    } finally {
+      setLiveLlmLoading(false);
+    }
+  };
+
+  // 2. Live Bulbul TTS Call
+  const handlePlayLiveBulbulTTS = async () => {
+    setLiveTtsLoading(true);
+    try {
+      const textToSpeak = activeCase.ivrCall.indicScriptText;
+      const lang = activeCase.language || 'hi-IN';
+
+      const res = await fetch('/api/sarvam-live/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: textToSpeak,
+          language_code: lang,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.audios && data.audios[0]) {
+        const audioSrc = `data:audio/wav;base64,${data.audios[0]}`;
+        setLiveTtsAudioUrl(audioSrc);
+
+        if (currentAudioRef.current) {
+          currentAudioRef.current.pause();
+        }
+
+        const audio = new Audio(audioSrc);
+        currentAudioRef.current = audio;
+        setAudioPlaying(true);
+        audio.onended = () => setAudioPlaying(false);
+        audio.onerror = () => setAudioPlaying(false);
+        await audio.play();
+      } else {
+        alert('Could not synthesize audio via Bulbul TTS.');
+      }
+    } catch (e: any) {
+      alert(`Bulbul TTS API Error: ${e.message}`);
+    } finally {
+      setLiveTtsLoading(false);
+    }
+  };
+
+  // 3. Live Sarvam Translation Call
+  const handleRunLiveTranslate = async () => {
+    setLiveTranslateLoading(true);
+    try {
+      const res = await fetch('/api/sarvam-live/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          input: activeCase.ivrCall.indicScriptText,
+          source_language_code: activeCase.language || 'hi-IN',
+          target_language_code: 'en-IN',
+        }),
+      });
+      const data = await res.json();
+      if (data.translated_text) {
+        setLiveTranslation(data.translated_text);
+      }
+    } catch (e: any) {
+      alert(`Translation API Error: ${e.message}`);
+    } finally {
+      setLiveTranslateLoading(false);
+    }
+  };
+
+  // Full Simulated Telephony Call Flow
   const handleSimulateCall = async () => {
     setIsCalling(true);
     setCallProgress('DIALING');
@@ -93,27 +220,16 @@ export default function App() {
       await audioSynthRef.current.playRingbackTone(1.2);
     }
     setCallProgress('CONNECTED');
-    setAudioPlaying(true);
 
-    // Browser Speech Synthesis for Indic response
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(activeCase.ivrCall.indicScriptText);
-      utterance.lang = activeCase.language || 'hi-IN';
-      utterance.rate = 0.95;
-      utterance.onend = () => {
-        setAudioPlaying(false);
-        setCallProgress('COMPLETED');
-        setIsCalling(false);
-      };
-      window.speechSynthesis.speak(utterance);
-    } else {
-      setTimeout(() => {
-        setAudioPlaying(false);
-        setCallProgress('COMPLETED');
-        setIsCalling(false);
-      }, 3500);
+    // Automatically trigger real Bulbul TTS if available
+    try {
+      await handlePlayLiveBulbulTTS();
+    } catch {
+      // Fallback
     }
+
+    setCallProgress('COMPLETED');
+    setIsCalling(false);
   };
 
   const handleTamperTest = () => {
@@ -179,6 +295,21 @@ export default function App() {
                 border: '1px solid rgba(79, 70, 229, 0.3)'
               }}>
                 AUDIT INTELLIGENCE
+              </span>
+              <span style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.35rem',
+                fontSize: '0.7rem',
+                fontWeight: 700,
+                backgroundColor: apiOnline ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                color: apiOnline ? '#10B981' : '#EF4444',
+                padding: '0.2rem 0.6rem',
+                borderRadius: 'var(--radius-full)',
+                border: apiOnline ? '1px solid #10B981' : '1px solid #EF4444',
+              }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: apiOnline ? '#10B981' : '#EF4444' }} />
+                {apiOnline ? 'LIVE API: Sarvam-105B & Bulbul Active' : 'Connecting to Sarvam API...'}
               </span>
             </div>
             <p style={{ margin: 0, fontSize: '0.75rem', color: 'var(--text-muted)' }}>
@@ -549,26 +680,53 @@ export default function App() {
             </div>
 
             <div style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--border-card)', borderRadius: 'var(--radius-lg)', padding: '1.5rem' }}>
-              <h3 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <Sparkles size={20} color="var(--color-primary)" />
-                Sarvam-105B Structured Output (JSON)
-              </h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                LLM parses unformatted Indic OCR into normalized enterprise audit schemas.
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <Sparkles size={20} color="var(--color-primary)" />
+                  Sarvam-105B Structured Output
+                </h3>
+                <button
+                  onClick={handleRunLiveLlm}
+                  disabled={liveLlmLoading}
+                  style={{
+                    backgroundColor: '#4F46E5',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 'var(--radius-md)',
+                    padding: '0.4rem 0.85rem',
+                    fontSize: '0.8rem',
+                    fontWeight: 700,
+                    cursor: liveLlmLoading ? 'not-allowed' : 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.35rem',
+                    boxShadow: 'var(--shadow-sm)'
+                  }}
+                >
+                  {liveLlmLoading ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />}
+                  {liveLlmLoading ? 'Querying Sarvam API...' : '⚡ Call Live Sarvam-105B API'}
+                </button>
+              </div>
+
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0.5rem 0 1rem' }}>
+                {liveLlmOutput
+                  ? 'Real-time JSON response returned directly from the Sarvam-105B LLM API:'
+                  : 'Click the button above to execute a real live API call to Sarvam-105B Conversations:'}
               </p>
 
               <pre style={{
                 backgroundColor: 'var(--bg-app)',
-                color: '#10B981',
+                color: liveLlmOutput ? '#6EE7B7' : '#10B981',
                 padding: '1.25rem',
                 borderRadius: 'var(--radius-md)',
                 fontFamily: 'var(--font-mono)',
                 fontSize: '0.8rem',
                 overflowX: 'auto',
-                border: '1px solid var(--border-subtle)',
-                lineHeight: 1.5
+                border: liveLlmOutput ? '1px solid #10B981' : '1px solid var(--border-subtle)',
+                lineHeight: 1.5,
+                maxHeight: '340px'
               }}>
-{JSON.stringify({
+{liveLlmOutput || JSON.stringify({
   receiptId: activeCase.id,
   scheme: activeCase.scheme,
   beneficiary: {
@@ -755,28 +913,50 @@ export default function App() {
                   </div>
                 )}
 
-                <button
-                  onClick={handleSimulateCall}
-                  disabled={isCalling}
-                  style={{
-                    backgroundColor: isCalling ? 'var(--bg-muted)' : 'var(--color-primary)',
-                    color: isCalling ? 'var(--text-subtle)' : '#fff',
-                    border: 'none',
-                    borderRadius: 'var(--radius-full)',
-                    padding: '0.75rem 1.75rem',
-                    fontSize: '0.9rem',
-                    fontWeight: 700,
-                    cursor: isCalling ? 'not-allowed' : 'pointer',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '0.5rem',
-                    boxShadow: 'var(--shadow-md)',
-                    marginTop: '0.75rem'
-                  }}
-                >
-                  <PhoneCall size={18} />
-                  {isCalling ? 'Call Active...' : 'Simulate Outbound Call'}
-                </button>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', alignItems: 'center', marginTop: '1rem' }}>
+                  <button
+                    onClick={handleSimulateCall}
+                    disabled={isCalling}
+                    style={{
+                      backgroundColor: isCalling ? 'var(--bg-muted)' : 'var(--color-primary)',
+                      color: isCalling ? 'var(--text-subtle)' : '#fff',
+                      border: 'none',
+                      borderRadius: 'var(--radius-full)',
+                      padding: '0.75rem 1.75rem',
+                      fontSize: '0.9rem',
+                      fontWeight: 700,
+                      cursor: isCalling ? 'not-allowed' : 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.5rem',
+                      boxShadow: 'var(--shadow-md)'
+                    }}
+                  >
+                    <PhoneCall size={18} />
+                    {isCalling ? 'Call Active...' : 'Simulate Outbound Call (Bulbul Voice)'}
+                  </button>
+
+                  <button
+                    onClick={handlePlayLiveBulbulTTS}
+                    disabled={liveTtsLoading}
+                    style={{
+                      backgroundColor: 'rgba(79, 70, 229, 0.1)',
+                      color: 'var(--color-primary)',
+                      border: '1px solid var(--color-primary)',
+                      borderRadius: 'var(--radius-full)',
+                      padding: '0.5rem 1.25rem',
+                      fontSize: '0.8rem',
+                      fontWeight: 700,
+                      cursor: liveTtsLoading ? 'not-allowed' : 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.4rem'
+                    }}
+                  >
+                    {liveTtsLoading ? <Loader2 size={14} className="spin" /> : <Volume2 size={14} />}
+                    {liveTtsLoading ? 'Generating via Sarvam Bulbul API...' : '🔊 Play Live Bulbul TTS Audio (Sarvam API)'}
+                  </button>
+                </div>
               </div>
 
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
@@ -785,8 +965,31 @@ export default function App() {
             </div>
 
             <div style={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--border-card)', borderRadius: 'var(--radius-lg)', padding: '1.5rem' }}>
-              <h3 style={{ marginTop: 0 }}>Live Vernacular Transcription</h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h3 style={{ margin: 0 }}>Live Vernacular Transcription</h3>
+                <button
+                  onClick={handleRunLiveTranslate}
+                  disabled={liveTranslateLoading}
+                  style={{
+                    backgroundColor: 'transparent',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 'var(--radius-md)',
+                    padding: '0.35rem 0.75rem',
+                    fontSize: '0.75rem',
+                    fontWeight: 600,
+                    cursor: liveTranslateLoading ? 'not-allowed' : 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.35rem',
+                    color: 'var(--text-main)'
+                  }}
+                >
+                  <Languages size={14} />
+                  {liveTranslateLoading ? 'Translating...' : 'Translate via Sarvam API'}
+                </button>
+              </div>
+
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0.4rem 0 1rem' }}>
                 Saaras ASR Indic speech-to-text transcript & Sarvam-105B contradiction detection.
               </p>
 
@@ -802,9 +1005,11 @@ export default function App() {
                   "{activeCase.ivrCall.indicScriptText}"
                 </p>
 
-                <div style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', marginTop: '1rem' }}>ENGLISH TRANSLATION:</div>
+                <div style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', marginTop: '1rem' }}>
+                  ENGLISH TRANSLATION {liveTranslation && <span style={{ color: '#10B981' }}>(Live Sarvam API)</span>}:
+                </div>
                 <p style={{ fontSize: '0.85rem', color: 'var(--text-main)', margin: '0.4rem 0' }}>
-                  "{activeCase.ivrCall.englishTranslation}"
+                  "{liveTranslation || activeCase.ivrCall.englishTranslation}"
                 </p>
 
                 <div style={{

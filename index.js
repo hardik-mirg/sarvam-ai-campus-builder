@@ -1,6 +1,5 @@
-const { SarvamAIClient } = require("sarvamai");
+import { SarvamAIClient } from "sarvamai";
 
-// Load environment variables from .env
 process.loadEnvFile();
 
 const apiKey = process.env.SARVAM_API_KEY;
@@ -25,11 +24,10 @@ async function main() {
   });
 
   const reply = response.choices?.[0]?.message?.content;
-  console.log(reply);
+  console.log("Sarvam API Response:", reply);
 }
 
 main().catch((err) => {
   console.error("API call failed:", err.message);
   process.exit(1);
 });
-
